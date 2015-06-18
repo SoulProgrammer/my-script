@@ -1,0 +1,306 @@
+#! /bin/bash                            
+
+#CONFIGURATION_VARIABLES
+
+MY_LOG="`mktemp`"
+out="$(mktemp)"
+DB_PASS=""
+DOMAIN_NM=""
+ZIPPED_WP="`mktemp`.tar.gz"
+UNZIPPED_WP="`mktemp -d`"
+CONCAT="_db"
+bold=$(tput bold)
+normal=$(tput sgr0)
+var="${bold}"
+text1="${bold}------------------------------------------------------------"
+text2="This is W O R D P R E S S  Installer"
+text3="You can find log file at $out"
+text4="${bold}------------------------------------------------------------"
+OUTPUT1="$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 8 | xargs)"
+passdb="$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 8 | xargs)" 
+#current=""
+
+#FUNCTION_DEFINITIONS
+
+function echo_c {
+  w=$(stty size | cut -d" " -f2)       #terminal width
+  l=${#1}                              #string length
+  printf "%"$((l+(w-l)/2))"s\n" "$1"   #print string padded to proper width (%Ws)
+ }   #for center alignment
+
+
+function rotateMe {
+       spin='-\|/'
+       i=0
+       while kill -0 $pid 2>/dev/null
+        do
+          i=$(( (i+1) %4 ))
+          printf "\r${spin:$i:1}"
+          sleep .1
+        printf "\b\b\b\b\b\b"
+        done
+        printf "    \b\b\b\b"    
+       }  #Throbber for wait state
+
+function progressBar
+{
+    local flag=false c count cr=$'\r' nl=$'\n'
+    while IFS='' read -d '' -rn 1 c
+    do
+        if $flag
+        then
+            printf '%c' "$c"
+        else
+            if [[ $c != $cr && $c != $nl ]]
+            then
+                count=0
+            else
+                ((count++))
+                if ((count > 1))
+                then
+                    flag=true
+                fi
+            fi
+        fi
+    done
+}    #selective output to indicate wget's progress 
+
+#MAIN_CODE
+
+if [ $EUID -ne 0 ];
+then 
+    echo "${normal}This has to be executed as a root user!" 1>&2
+    echo "Please provide sudo permissions!" 1>&2
+    exit 1
+fi
+clear
+echo_c "$text1"
+echo_c "$text2" 
+echo_c "$text3"
+echo_c "$text4"
+touch $MY_LOG
+chmod 777 $MY_LOG
+echo ""
+echo ""
+echo ""
+echo "${normal}Updating packages..."
+
+#apt-get update >> $MY_LOG 2>&1 & pid=$!
+rotateMe
+
+if [ $? -ne 0 ];
+then
+    echo "Failed to complete update, please check Log file $MY_LOG" 
+fi
+
+#Installing dependencies
+echo ""
+echo "Looking for php5-fpm php5 php5-mysql installed packages.."
+dpkg-query -s php5-fpm >> $MY_LOG 2>&1    #checking package for php5
+if [ $? -ne 0 ];
+then
+    echo "php5-fpm is not installed, now installing.."
+    apt-get -y install php5-fpm >> $MY_LOG 2>&1 
+        if [ $? -ne 0 ];
+        then
+            echo "PHP5 installation failed, check $MYLOG" 1>&2
+            exit 1
+        fi
+        else
+            echo "php5-fpm is already installed, skipping installation.."
+fi
+dpkg-query -s php5 >> $MY_LOG 2>&1 
+if [ $? -ne 0 ];
+then
+    echo "php5-mysql php5 packages are not installed, now installing.."
+    apt-get -y install php5-mysql php5 >> $MY_LOG 2>&1 
+        if [ $? -ne 0 ];
+        then
+            echo "Unable to install php5-mysql, please check log at $MY_LOG" 1>&2
+        fi
+        else
+            echo "php5-mysql is already installed, skipping installation.."
+fi
+
+echo ""
+echo "Now searching for MySQL-Server installation.." 
+dpkg-query -s mysql-server >> $MY_LOG 2>&1            #checking packages for mysql
+if [ $? -ne 0 ];
+then
+    echo "MySQLserver is not installed, now installing.."
+    echo ""
+    
+    debconf-set-selections <<< "mysql-server mysql-server/root_password password $passdb"
+    debconf-set-selections <<< "mysql-server mysql-server/root_password_again password $passdb"
+    apt-get -y install mysql-server >> MY_LOG 2>&1
+        if [ $? -ne 0 ];
+        then
+            echo "MySQL server installation failed, check $MY_LOG" 
+            exit 1  
+        fi
+        else
+            echo "MySQL is already installed, skipping installation.."
+            echo ""
+            echo -n "Enter root password for database:"
+            read DB_PASS
+fi
+
+echo ""
+echo "Now searching for Nginx installation.."
+dpkg-query -s nginx >> $MY_LOG 2>&1                    #checking packages for nginx
+
+if [ $? -ne 0 ];
+then
+    echo "Nginx is not installed on the system, now installing.."
+    apt-get -y install nginx >> $MY_LOG
+        if [ $? -ne 0 ];
+        then
+            echo "Nginx installation failed, check log file $MY_LOG" 1>&2
+            exit 1 
+        fi
+        else
+            echo "Nginx is already installed, skipping installation.."
+fi
+
+echo "Installation successful! Now configuring Nginx.."
+echo ""
+
+#echo "Now configuring Nginx.."
+echo -n "Enter domain name of your choice:"
+read DOMAIN_NM
+while [ -d "/var/www/$DOMAIN_NM" ];
+    do
+        echo -n "Domain name already exists, please choose another:"
+        read DOMAIN_NM
+    done
+
+echo "127.0.0.1 $DOMAIN_NM" >> /etc/hosts  #Creating entries pointing to localhost IP  
+
+cat <<CONFIG > /etc/nginx/sites-available/$DOMAIN_NM
+server {
+           listen 80;
+           root /var/www/$DOMAIN_NM;
+           index index.php index.html index.htm;
+           server_name $DOMAIN_NM;
+           location / {
+                          try_files \$uri \$uri/ /index.php?q=\$uri&\$args;
+                      }
+           error_page 404 /404.html;
+           error_page 500 502 503 504 /50x.html;
+           location = /50x.html {
+                                    root /usr/share/nginx/www;
+                                }
+           location ~ \.php$ {
+                                 try_files \$uri =404;
+                                 fastcgi_pass unix:/var/run/php5-fpm.sock;
+                                 fastcgi_index index.php;
+                                 include fastcgi_params;
+                             }
+       }
+CONFIG
+ln -sf /etc/nginx/sites-available/$DOMAIN_NM /etc/nginx/sites-enabled/$DOMAIN_NM
+
+echo ""
+echo "Starting download of Wordpress.."
+wget --progress=bar:force -O $ZIPPED_WP http://wordpress.org/latest.tar.gz 2>&1 | progressBar  
+
+if [ $? -ne 0 ];
+then
+    echo "Failed to download WordPress, check $MY_LOG"
+    exit 1
+fi
+echo "Download Successfull, unzipping Wordpress.."
+type tar >> $MY_LOG
+if [ $? -ne 0 ];
+then 
+    apt-get install tar >> $MY_LOG
+        if [ $? -ne o ];then
+            echo "Tar installation failed, check $MY_LOG"
+            exit 1 
+        fi
+fi
+cd $UNZIPPED_WP
+tar -xvf $ZIPPED_WP >> $MY_LOG
+cd - >> $MY_LOG 2>&1
+
+if [ $? -ne 0 ];
+then
+    echo "Unable to unzip latest.tar.gz, check $MY_LOG"
+    exit 1
+fi
+
+echo "Configuring Wordpress.."
+mkdir -p /var/www/$DOMAIN_NM
+
+if [ $? -ne 0 ];
+then 
+    echo "Unable to create directory /var/www/$DOMAIN_NM, check $MY_LOG"
+    exit 1
+fi
+
+cp -rf $UNZIPPED_WP/wordpress/* /var/www/$DOMAIN_NM
+
+if [ $? -ne 0 ];
+then
+    echo "Failed while attempting to configure Wordpress, please check $MY_LOG"
+    exit 1
+fi
+
+echo "Wordpress configured successfully!"
+sed -i "s/username_here/wordpressuser/" /var/www/$DOMAIN_NM/wp-config-sample.php 
+sed -i "s/database_name_here/$DOMAIN_NM$CONCAT/" /var/www/$DOMAIN_NM/wp-config-sample.php 
+sed -i "s/password_here/$OUTPUT1/" /var/www/$DOMAIN_NM/wp-config-sample.php  
+cp /var/www/$DOMAIN_NM/wp-config-sample.php /var/www/$DOMAIN_NM/wp-config.php
+
+SALT=$(curl -s -L https://api.wordpress.org/secret-key/1.1/salt/)
+STRING='put your unique phrase here'
+printf '%s\n' "g/$STRING/d" a "$SALT" . w | ed -s /var/www/$DOMAIN_NM/wp-config.php
+chown -R www-data:www-data /var/www/$DOMAIN_NM
+
+if [ $? -ne 0 ];
+then
+    echo "ERROR: Failed to get Ownership of www-data:www-data /var/www/$DOMAIN_NM, check logfile $MY_LOG" 1>&2
+    exit 1
+fi
+
+chmod -R 755 /var/www
+
+echo "Creating MySQL database..."
+
+
+echo "$passdb"
+
+########################################THIS IS WHERE THE PROBLEM IS##################################################
+
+if dpkg-query -Wf'${db:Status-abbrev}' mysql-server 2>/dev/null | grep -q '^i'; then
+   {
+    #printf 'Why yes, the package "%s" _is_ installed!\n' "$1"
+    current="$DB_PASS" 
+    echo "$current"
+   } 
+else
+   { 
+     #printf 'I regret to inform you that the package "%s" is not currently installed.\n' "$1"
+     current="$passdb"
+     echo "$current"
+   }  
+fi
+
+
+mysql --user=root --password=$current --execute="CREATE DATABASE IF NOT EXISTS \`$DOMAIN_NM$CONCAT\`; grant all on \`$DOMAIN_NM$CONCAT\`.* to 'wordpressuser'@'localhost' identified by '$OUTPUT1'; FLUSH PRIVILEGES;" >> $MY_LOG 2>&1
+if [ $? -ne 0 ];
+then
+    echo "Failed to Create Database, check logfile $MY_LOG" 1>&2
+    exit 1
+fi
+###################################################################################################################
+rm $ZIPPED_WP
+rm -rf $UNZIPPED_WP
+service nginx restart >> $MY_LOG     #restarting services 
+service php5-fpm restart >> $MY_LOG  #restarting services
+echo ""
+
+echo "Yippiee! Your Wordpress site is ready!"
+echo "Please open http://$DOMAIN_NM in your web-browser to access it."
+echo ""
+exit 0;
